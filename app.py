@@ -13,6 +13,7 @@ import threading
 import urllib3
 import random
 
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -23,12 +24,14 @@ urllib3.disable_warnings(
     urllib3.exceptions.InsecureRequestWarning
 )
 
+
 # ============================================================
 # GLOBAL STATE
 # ============================================================
 
 current_batch_indices = {}
 batch_indices_lock = threading.Lock()
+
 
 # ============================================================
 # TOKEN BATCH MANAGEMENT
@@ -41,9 +44,10 @@ def get_next_batch_tokens(server_name, all_tokens):
     total_tokens = len(all_tokens)
 
     if total_tokens <= TOKEN_BATCH_SIZE:
-        return all_tokens
+        return all_tokens.copy()
 
     with batch_indices_lock:
+
         if server_name not in current_batch_indices:
             current_batch_indices[server_name] = 0
 
@@ -53,14 +57,19 @@ def get_next_batch_tokens(server_name, all_tokens):
         end_index = start_index + TOKEN_BATCH_SIZE
 
         if end_index > total_tokens:
+
             remaining = end_index - total_tokens
 
             batch_tokens = (
                 all_tokens[start_index:total_tokens]
                 + all_tokens[0:remaining]
             )
+
         else:
-            batch_tokens = all_tokens[start_index:end_index]
+
+            batch_tokens = all_tokens[
+                start_index:end_index
+            ]
 
         next_index = (
             current_index + TOKEN_BATCH_SIZE
@@ -88,6 +97,7 @@ def get_random_batch_tokens(server_name, all_tokens):
         all_tokens,
         TOKEN_BATCH_SIZE
     )
+
 
 # ============================================================
 # TOKEN FILE LOADER
@@ -198,6 +208,7 @@ def load_tokens(server_name, for_visit=False):
 
         return []
 
+
 # ============================================================
 # AES ENCRYPTION
 # ============================================================
@@ -226,6 +237,7 @@ def encrypt_message(plaintext):
         encrypted_message
     ).decode("utf-8")
 
+
 # ============================================================
 # LIKE PROTOBUF
 # ============================================================
@@ -241,6 +253,7 @@ def create_protobuf_message(
     message.region = region
 
     return message.SerializeToString()
+
 
 # ============================================================
 # PROFILE PROTOBUF
@@ -268,6 +281,7 @@ def enc_profile_check_payload(uid):
 
     return encrypted_uid
 
+
 # ============================================================
 # LIKE REQUEST
 # ============================================================
@@ -278,9 +292,19 @@ async def send_single_like_request(
     url
 ):
 
-    edata = bytes.fromhex(
-        encrypted_like_payload
-    )
+    try:
+
+        edata = bytes.fromhex(
+            encrypted_like_payload
+        )
+
+    except Exception as e:
+
+        print(
+            f"[LIKE] Invalid encrypted payload: {e}"
+        )
+
+        return 997
 
     token_value = token_dict.get(
         "token",
@@ -333,23 +357,26 @@ async def send_single_like_request(
             total=10
         )
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(
+            timeout=timeout
+        ) as session:
 
             async with session.post(
                 url,
                 data=edata,
-                headers=headers,
-                timeout=timeout
+                headers=headers
             ) as response:
 
-                if response.status != 200:
+                status = response.status
+
+                if status != 200:
 
                     print(
                         "[LIKE] Request failed "
-                        f"status={response.status}"
+                        f"status={status}"
                     )
 
-                return response.status
+                return status
 
     except asyncio.TimeoutError:
 
@@ -367,6 +394,7 @@ async def send_single_like_request(
 
         return 997
 
+
 # ============================================================
 # SEND LIKE BATCH
 # ============================================================
@@ -377,8 +405,13 @@ async def send_likes_with_token_batch(
     like_api_url,
     token_batch_to_use
 ):
+
     if not token_batch_to_use:
-        print("[LIKE] No tokens in batch")
+
+        print(
+            "[LIKE] No tokens in batch"
+        )
+
         return {
             "total": 0,
             "success": 0,
@@ -386,18 +419,50 @@ async def send_likes_with_token_batch(
             "status_codes": {}
         }
 
-    like_protobuf_payload = create_protobuf_message(
-        uid,
-        server_region_for_like_proto
-    )
+    # --------------------------------------------------------
+    # CREATE PAYLOAD
+    # --------------------------------------------------------
 
-    encrypted_like_payload = encrypt_message(
-        like_protobuf_payload
-    )
+    try:
+
+        like_protobuf_payload = (
+            create_protobuf_message(
+                uid,
+                server_region_for_like_proto
+            )
+        )
+
+        encrypted_like_payload = (
+            encrypt_message(
+                like_protobuf_payload
+            )
+        )
+
+    except Exception as e:
+
+        print(
+            f"[LIKE] Payload error: {e}"
+        )
+
+        return {
+            "total": len(token_batch_to_use),
+            "success": 0,
+            "failed": len(token_batch_to_use),
+            "status_codes": {
+                "payload_error": len(
+                    token_batch_to_use
+                )
+            }
+        }
+
+    # --------------------------------------------------------
+    # CREATE TASKS
+    # --------------------------------------------------------
 
     tasks = []
 
     for token_dict in token_batch_to_use:
+
         tasks.append(
             send_single_like_request(
                 encrypted_like_payload,
@@ -406,22 +471,57 @@ async def send_likes_with_token_batch(
             )
         )
 
-    results = await asyncio.gather(
-        *tasks,
-        return_exceptions=True
-    )
+    # --------------------------------------------------------
+    # EXECUTE
+    # --------------------------------------------------------
+
+    try:
+
+        results = await asyncio.gather(
+            *tasks,
+            return_exceptions=True
+        )
+
+    except Exception as e:
+
+        print(
+            f"[LIKE] Gather exception: {e}"
+        )
+
+        return {
+            "total": len(token_batch_to_use),
+            "success": 0,
+            "failed": len(token_batch_to_use),
+            "status_codes": {
+                "gather_exception": len(
+                    token_batch_to_use
+                )
+            }
+        }
+
+    # --------------------------------------------------------
+    # STATUS CODE SUMMARY
+    # --------------------------------------------------------
 
     status_codes = {}
 
     for result in results:
+
         if isinstance(result, int):
+
             key = str(result)
+
         else:
+
             key = "exception"
 
         status_codes[key] = (
             status_codes.get(key, 0) + 1
         )
+
+    # --------------------------------------------------------
+    # SUCCESS / FAILED
+    # --------------------------------------------------------
 
     successful_sends = sum(
         1
@@ -435,15 +535,27 @@ async def send_likes_with_token_batch(
         - successful_sends
     )
 
+    # --------------------------------------------------------
+    # LOG
+    # --------------------------------------------------------
+
     print(
-        f"[LIKE] Total={len(token_batch_to_use)} "
-        f"Success={successful_sends} "
-        f"Failed={failed_sends}"
+        f"[LIKE] Total="
+        f"{len(token_batch_to_use)} "
+        f"Success="
+        f"{successful_sends} "
+        f"Failed="
+        f"{failed_sends}"
     )
 
     print(
-        f"[LIKE] HTTP status: {status_codes}"
+        f"[LIKE] HTTP status: "
+        f"{status_codes}"
     )
+
+    # --------------------------------------------------------
+    # RESULT
+    # --------------------------------------------------------
 
     return {
         "total": len(token_batch_to_use),
@@ -451,6 +563,7 @@ async def send_likes_with_token_batch(
         "failed": failed_sends,
         "status_codes": status_codes
     }
+
 
 # ============================================================
 # PROFILE ENDPOINT
@@ -493,6 +606,7 @@ def get_profile_url(server_name):
             "GetPlayerPersonalShow"
         )
 
+
 # ============================================================
 # LIKE ENDPOINT
 # ============================================================
@@ -534,6 +648,7 @@ def get_like_url(server_name):
             "LikeProfile"
         )
 
+
 # ============================================================
 # PROFILE CHECK REQUEST
 # ============================================================
@@ -561,9 +676,19 @@ def make_profile_check_request(
         server_name
     )
 
-    edata = bytes.fromhex(
-        encrypted_profile_payload
-    )
+    try:
+
+        edata = bytes.fromhex(
+            encrypted_profile_payload
+        )
+
+    except Exception as e:
+
+        print(
+            f"[PROFILE] Invalid payload: {e}"
+        )
+
+        return None
 
     headers = {
 
@@ -642,6 +767,7 @@ def make_profile_check_request(
 
     return None
 
+
 # ============================================================
 # DECODE PROFILE
 # ============================================================
@@ -668,11 +794,13 @@ def decode_protobuf_profile_info(
 
         return None
 
+
 # ============================================================
 # FLASK
 # ============================================================
 
 app = Flask(__name__)
+
 
 # ============================================================
 # /LIKE
@@ -684,309 +812,396 @@ app = Flask(__name__)
 )
 def handle_requests():
 
-    uid_param = request.args.get(
-        "uid"
-    )
-
-    server_name_param = (
-        request.args
-        .get(
-            "server_name",
-            ""
-        )
-        .upper()
-    )
-
-    use_random = (
-        request.args
-        .get(
-            "random",
-            "false"
-        )
-        .lower()
-        == "true"
-    )
-
-    # --------------------------------------------------------
-    # VALIDATION
-    # --------------------------------------------------------
-
-    if not uid_param:
-
-        return jsonify({
-            "error":
-                "UID is required"
-        }), 400
-
-    if not server_name_param:
-
-        return jsonify({
-            "error":
-                "server_name is required"
-        }), 400
-
-    # --------------------------------------------------------
-    # ALLOWED SERVERS
-    # --------------------------------------------------------
-
-    allowed_servers = {
-        "ID",
-        "IND",
-        "BD",
-        "BR",
-        "US",
-        "SAC",
-        "NA"
-    }
-
-    if server_name_param not in allowed_servers:
-
-        return jsonify({
-            "error":
-                "Unsupported server",
-            "allowed_servers":
-                sorted(allowed_servers)
-        }), 400
-
-    # --------------------------------------------------------
-    # LOAD VISIT TOKENS
-    # --------------------------------------------------------
-
-    visit_tokens = load_tokens(
-        server_name_param,
-        for_visit=True
-    )
-
-    if not visit_tokens:
-
-        return jsonify({
-            "error":
-                f"No visit tokens loaded "
-                f"for server "
-                f"{server_name_param}."
-        }), 500
-
-    visit_token = visit_tokens[0]
-
-    # --------------------------------------------------------
-    # LOAD REGULAR TOKENS
-    # --------------------------------------------------------
-
-    all_available_tokens = load_tokens(
-        server_name_param,
-        for_visit=False
-    )
-
-    if not all_available_tokens:
-
-        return jsonify({
-            "error":
-                f"No regular tokens loaded "
-                f"for server "
-                f"{server_name_param}."
-        }), 500
-
-    print(
-        f"[API] Server={server_name_param} "
-        f"UID={uid_param} "
-        f"Tokens={len(all_available_tokens)}"
-    )
-
-    # --------------------------------------------------------
-    # SELECT TOKEN BATCH
-    # --------------------------------------------------------
-
-    if use_random:
-
-        tokens_for_like_sending = (
-            get_random_batch_tokens(
-                server_name_param,
-                all_available_tokens
-            )
-        )
-
-        batch_mode = "random"
-
-    else:
-
-        tokens_for_like_sending = (
-            get_next_batch_tokens(
-                server_name_param,
-                all_available_tokens
-            )
-        )
-
-        batch_mode = "rotating"
-
-    # --------------------------------------------------------
-    # PROFILE PAYLOAD
-    # --------------------------------------------------------
-
-    encrypted_player_uid_for_profile = (
-        enc_profile_check_payload(
-            uid_param
-        )
-    )
-
-    # --------------------------------------------------------
-    # BEFORE
-    # --------------------------------------------------------
-
-    before_info = (
-        make_profile_check_request(
-            encrypted_player_uid_for_profile,
-            server_name_param,
-            visit_token
-        )
-    )
-
-    before_like_count = 0
-
-    if (
-        before_info
-        and hasattr(
-            before_info,
-            "AccountInfo"
-        )
-    ):
-
-        before_like_count = int(
-            before_info.AccountInfo.Likes
-        )
-
-    print(
-        f"[API] UID={uid_param} "
-        f"Likes before={before_like_count}"
-    )
-
-    # --------------------------------------------------------
-    # SEND LIKES
-    # --------------------------------------------------------
-
-    like_api_url = get_like_url(
-        server_name_param
-    )
-
-    like_result = {
-    "total": 0,
-    "success": 0,
-    "failed": 0,
-    "status_codes": {}
-}
-
-if tokens_for_like_sending:
-
-    loop = asyncio.new_event_loop()
-
-    asyncio.set_event_loop(loop)
-
     try:
 
-        like_result = loop.run_until_complete(
-            send_likes_with_token_batch(
-                uid_param,
-                server_name_param,
-                like_api_url,
-                tokens_for_like_sending
+        # ----------------------------------------------------
+        # PARAMETERS
+        # ----------------------------------------------------
+
+        uid_param = request.args.get(
+            "uid"
+        )
+
+        server_name_param = (
+            request.args
+            .get(
+                "server_name",
+                ""
+            )
+            .upper()
+        )
+
+        use_random = (
+            request.args
+            .get(
+                "random",
+                "false"
+            )
+            .lower()
+            == "true"
+        )
+
+        # ----------------------------------------------------
+        # VALIDATION
+        # ----------------------------------------------------
+
+        if not uid_param:
+
+            return jsonify({
+                "error":
+                    "UID is required"
+            }), 400
+
+        if not server_name_param:
+
+            return jsonify({
+                "error":
+                    "server_name is required"
+            }), 400
+
+        try:
+
+            int(uid_param)
+
+        except ValueError:
+
+            return jsonify({
+                "error":
+                    "UID must be numeric"
+            }), 400
+
+        # ----------------------------------------------------
+        # ALLOWED SERVERS
+        # ----------------------------------------------------
+
+        allowed_servers = {
+            "ID",
+            "IND",
+            "BD",
+            "BR",
+            "US",
+            "SAC",
+            "NA"
+        }
+
+        if server_name_param not in allowed_servers:
+
+            return jsonify({
+                "error":
+                    "Unsupported server",
+                "allowed_servers":
+                    sorted(allowed_servers)
+            }), 400
+
+        # ----------------------------------------------------
+        # LOAD VISIT TOKENS
+        # ----------------------------------------------------
+
+        visit_tokens = load_tokens(
+            server_name_param,
+            for_visit=True
+        )
+
+        if not visit_tokens:
+
+            return jsonify({
+                "error":
+                    f"No visit tokens loaded "
+                    f"for server "
+                    f"{server_name_param}."
+            }), 500
+
+        visit_token = visit_tokens[0]
+
+        # ----------------------------------------------------
+        # LOAD REGULAR TOKENS
+        # ----------------------------------------------------
+
+        all_available_tokens = load_tokens(
+            server_name_param,
+            for_visit=False
+        )
+
+        if not all_available_tokens:
+
+            return jsonify({
+                "error":
+                    f"No regular tokens loaded "
+                    f"for server "
+                    f"{server_name_param}."
+            }), 500
+
+        print(
+            f"[API] Server={server_name_param} "
+            f"UID={uid_param} "
+            f"Tokens={len(all_available_tokens)}"
+        )
+
+        # ----------------------------------------------------
+        # SELECT TOKEN BATCH
+        # ----------------------------------------------------
+
+        if use_random:
+
+            tokens_for_like_sending = (
+                get_random_batch_tokens(
+                    server_name_param,
+                    all_available_tokens
+                )
+            )
+
+            batch_mode = "random"
+
+        else:
+
+            tokens_for_like_sending = (
+                get_next_batch_tokens(
+                    server_name_param,
+                    all_available_tokens
+                )
+            )
+
+            batch_mode = "rotating"
+
+        # ----------------------------------------------------
+        # PROFILE PAYLOAD
+        # ----------------------------------------------------
+
+        encrypted_player_uid_for_profile = (
+            enc_profile_check_payload(
+                uid_param
             )
         )
 
-    finally:
+        # ----------------------------------------------------
+        # BEFORE
+        # ----------------------------------------------------
 
-        loop.close()
-
-    # --------------------------------------------------------
-    # AFTER
-    # --------------------------------------------------------
-
-    after_info = (
-        make_profile_check_request(
-            encrypted_player_uid_for_profile,
-            server_name_param,
-            visit_token
+        before_info = (
+            make_profile_check_request(
+                encrypted_player_uid_for_profile,
+                server_name_param,
+                visit_token
+            )
         )
-    )
 
-    after_like_count = (
-        before_like_count
-    )
+        before_like_count = 0
 
-    actual_player_uid = int(
-        uid_param
-    )
+        if (
+            before_info
+            and hasattr(
+                before_info,
+                "AccountInfo"
+            )
+        ):
 
-    player_nickname = "N/A"
+            before_like_count = int(
+                before_info.AccountInfo.Likes
+            )
 
-    if (
-        after_info
-        and hasattr(
-            after_info,
-            "AccountInfo"
+        print(
+            f"[API] UID={uid_param} "
+            f"Likes before={before_like_count}"
         )
-    ):
 
-        after_like_count = int(
-            after_info.AccountInfo.Likes
+        # ----------------------------------------------------
+        # SEND LIKES
+        # ----------------------------------------------------
+
+        like_api_url = get_like_url(
+            server_name_param
+        )
+
+        like_result = {
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "status_codes": {}
+        }
+
+        if tokens_for_like_sending:
+
+            loop = asyncio.new_event_loop()
+
+            try:
+
+                asyncio.set_event_loop(
+                    loop
+                )
+
+                like_result = (
+                    loop.run_until_complete(
+                        send_likes_with_token_batch(
+                            uid_param,
+                            server_name_param,
+                            like_api_url,
+                            tokens_for_like_sending
+                        )
+                    )
+                )
+
+            except Exception as e:
+
+                print(
+                    f"[LIKE] Batch error: {e}"
+                )
+
+                like_result = {
+                    "total":
+                        len(
+                            tokens_for_like_sending
+                        ),
+
+                    "success": 0,
+
+                    "failed":
+                        len(
+                            tokens_for_like_sending
+                        ),
+
+                    "status_codes": {
+                        "batch_exception": 1
+                    }
+                }
+
+            finally:
+
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+
+        # ----------------------------------------------------
+        # AFTER
+        # ----------------------------------------------------
+
+        after_info = (
+            make_profile_check_request(
+                encrypted_player_uid_for_profile,
+                server_name_param,
+                visit_token
+            )
+        )
+
+        after_like_count = (
+            before_like_count
         )
 
         actual_player_uid = int(
-            after_info.AccountInfo.UID
+            uid_param
         )
 
-        if after_info.AccountInfo.PlayerNickname:
+        player_nickname = "N/A"
 
-            player_nickname = str(
-                after_info.AccountInfo.PlayerNickname
+        if (
+            after_info
+            and hasattr(
+                after_info,
+                "AccountInfo"
+            )
+        ):
+
+            after_like_count = int(
+                after_info.AccountInfo.Likes
             )
 
-    print(
-        f"[API] UID={uid_param} "
-        f"Likes after={after_like_count}"
-    )
+            actual_player_uid = int(
+                after_info.AccountInfo.UID
+            )
 
-    # --------------------------------------------------------
-    # RESULT
-    # --------------------------------------------------------
+            if (
+                after_info.AccountInfo.PlayerNickname
+            ):
 
-    likes_increment = (
-        after_like_count
-        - before_like_count
-    )
+                player_nickname = str(
+                    after_info.AccountInfo.PlayerNickname
+                )
 
-    if likes_increment > 0:
+        print(
+            f"[API] UID={uid_param} "
+            f"Likes after={after_like_count}"
+        )
 
-        request_status = 1
+        # ----------------------------------------------------
+        # CALCULATE RESULT
+        # ----------------------------------------------------
 
-    elif likes_increment == 0:
+        likes_increment = (
+            after_like_count
+            - before_like_count
+        )
 
-        request_status = 2
+        if likes_increment > 0:
 
-    else:
+            request_status = 1
 
-        request_status = 3
+        elif likes_increment == 0:
 
-    response_data = {
-    "LikesGivenByAPI": likes_increment,
-    "LikesafterCommand": after_like_count,
-    "LikesbeforeCommand": before_like_count,
-    "PlayerNickname": player_nickname,
-    "UID": actual_player_uid,
-    "status": request_status,
+            request_status = 2
 
-    "server": server_name_param,
+        else:
 
-    "batch_mode": batch_mode,
+            request_status = 3
 
-    "tokens_used": len(tokens_for_like_sending),
+        # ----------------------------------------------------
+        # RESPONSE
+        # ----------------------------------------------------
 
-    "like_requests": like_result,
+        response_data = {
 
-    "Note": "Profile checked before and after the like request."
-}
+            "LikesGivenByAPI":
+                likes_increment,
 
-    return jsonify(
-        response_data
-    )
+            "LikesafterCommand":
+                after_like_count,
+
+            "LikesbeforeCommand":
+                before_like_count,
+
+            "PlayerNickname":
+                player_nickname,
+
+            "UID":
+                actual_player_uid,
+
+            "status":
+                request_status,
+
+            "server":
+                server_name_param,
+
+            "batch_mode":
+                batch_mode,
+
+            "tokens_used":
+                len(
+                    tokens_for_like_sending
+                ),
+
+            "like_requests":
+                like_result,
+
+            "Note":
+                "Profile checked before and after the like request."
+        }
+
+        return jsonify(
+            response_data
+        )
+
+    except Exception as e:
+
+        print(
+            f"[API] Unhandled error: {e}"
+        )
+
+        return jsonify({
+            "error":
+                "Internal server error",
+            "message":
+                str(e)
+        }), 500
+
 
 # ============================================================
 # /TOKEN_INFO
@@ -998,41 +1213,57 @@ if tokens_for_like_sending:
 )
 def token_info():
 
-    servers = [
-        "ID",
-        "IND",
-        "BD",
-        "BR",
-        "US",
-        "SAC",
-        "NA"
-    ]
+    try:
 
-    info = {}
+        servers = [
+            "ID",
+            "IND",
+            "BD",
+            "BR",
+            "US",
+            "SAC",
+            "NA"
+        ]
 
-    for server in servers:
+        info = {}
 
-        regular_tokens = load_tokens(
-            server,
-            for_visit=False
+        for server in servers:
+
+            regular_tokens = load_tokens(
+                server,
+                for_visit=False
+            )
+
+            visit_tokens = load_tokens(
+                server,
+                for_visit=True
+            )
+
+            info[server] = {
+
+                "regular_tokens":
+                    len(regular_tokens),
+
+                "visit_tokens":
+                    len(visit_tokens)
+
+            }
+
+        return jsonify(info)
+
+    except Exception as e:
+
+        print(
+            f"[TOKEN_INFO] Error: {e}"
         )
 
-        visit_tokens = load_tokens(
-            server,
-            for_visit=True
-        )
+        return jsonify({
+            "error":
+                "Internal server error",
+            "message":
+                str(e)
+        }), 500
 
-        info[server] = {
-
-            "regular_tokens":
-                len(regular_tokens),
-
-            "visit_tokens":
-                len(visit_tokens)
-
-        }
-
-    return jsonify(info)
 
 # ============================================================
 # HEALTH CHECK
@@ -1068,6 +1299,7 @@ def home():
         ]
 
     })
+
 
 # ============================================================
 # RUN

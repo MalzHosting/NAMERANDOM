@@ -377,32 +377,27 @@ async def send_likes_with_token_batch(
     like_api_url,
     token_batch_to_use
 ):
-
     if not token_batch_to_use:
+        print("[LIKE] No tokens in batch")
+        return {
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "status_codes": {}
+        }
 
-        print(
-            "[LIKE] No tokens in batch"
-        )
-
-        return []
-
-    like_protobuf_payload = (
-        create_protobuf_message(
-            uid,
-            server_region_for_like_proto
-        )
+    like_protobuf_payload = create_protobuf_message(
+        uid,
+        server_region_for_like_proto
     )
 
-    encrypted_like_payload = (
-        encrypt_message(
-            like_protobuf_payload
-        )
+    encrypted_like_payload = encrypt_message(
+        like_protobuf_payload
     )
 
     tasks = []
 
     for token_dict in token_batch_to_use:
-
         tasks.append(
             send_single_like_request(
                 encrypted_like_payload,
@@ -415,6 +410,18 @@ async def send_likes_with_token_batch(
         *tasks,
         return_exceptions=True
     )
+
+    status_codes = {}
+
+    for result in results:
+        if isinstance(result, int):
+            key = str(result)
+        else:
+            key = "exception"
+
+        status_codes[key] = (
+            status_codes.get(key, 0) + 1
+        )
 
     successful_sends = sum(
         1
@@ -429,13 +436,21 @@ async def send_likes_with_token_batch(
     )
 
     print(
-        "[LIKE] Batch completed | "
-        f"Total={len(token_batch_to_use)} | "
-        f"Success={successful_sends} | "
+        f"[LIKE] Total={len(token_batch_to_use)} "
+        f"Success={successful_sends} "
         f"Failed={failed_sends}"
     )
 
-    return results
+    print(
+        f"[LIKE] HTTP status: {status_codes}"
+    )
+
+    return {
+        "total": len(token_batch_to_use),
+        "success": successful_sends,
+        "failed": failed_sends,
+        "status_codes": status_codes
+    }
 
 # ============================================================
 # PROFILE ENDPOINT
@@ -852,28 +867,33 @@ def handle_requests():
         server_name_param
     )
 
-    if tokens_for_like_sending:
+    like_result = {
+    "total": 0,
+    "success": 0,
+    "failed": 0,
+    "status_codes": {}
+}
 
-        loop = asyncio.new_event_loop()
+if tokens_for_like_sending:
 
-        asyncio.set_event_loop(
-            loop
+    loop = asyncio.new_event_loop()
+
+    asyncio.set_event_loop(loop)
+
+    try:
+
+        like_result = loop.run_until_complete(
+            send_likes_with_token_batch(
+                uid_param,
+                server_name_param,
+                like_api_url,
+                tokens_for_like_sending
+            )
         )
 
-        try:
+    finally:
 
-            loop.run_until_complete(
-                send_likes_with_token_batch(
-                    uid_param,
-                    server_name_param,
-                    like_api_url,
-                    tokens_for_like_sending
-                )
-            )
-
-        finally:
-
-            loop.close()
+        loop.close()
 
     # --------------------------------------------------------
     # AFTER
@@ -946,40 +966,23 @@ def handle_requests():
         request_status = 3
 
     response_data = {
+    "LikesGivenByAPI": likes_increment,
+    "LikesafterCommand": after_like_count,
+    "LikesbeforeCommand": before_like_count,
+    "PlayerNickname": player_nickname,
+    "UID": actual_player_uid,
+    "status": request_status,
 
-        "LikesGivenByAPI":
-            likes_increment,
+    "server": server_name_param,
 
-        "LikesafterCommand":
-            after_like_count,
+    "batch_mode": batch_mode,
 
-        "LikesbeforeCommand":
-            before_like_count,
+    "tokens_used": len(tokens_for_like_sending),
 
-        "PlayerNickname":
-            player_nickname,
+    "like_requests": like_result,
 
-        "UID":
-            actual_player_uid,
-
-        "status":
-            request_status,
-
-        "server":
-            server_name_param,
-
-        "batch_mode":
-            batch_mode,
-
-        "tokens_used":
-            len(
-                tokens_for_like_sending
-            ),
-
-        "Note":
-            "Profile checked before and after "
-            "the like request."
-    }
+    "Note": "Profile checked before and after the like request."
+}
 
     return jsonify(
         response_data
